@@ -293,10 +293,12 @@
         </div>
         
         <div class="format-instructions">
-            <h3>📋 Data Format Instructions</h3>
-            <p>Export your Auctioneer data as CSV with these columns:</p>
+            <h3>📋 Supported Data Formats</h3>
+            <p><strong>Option 1:</strong> Upload CSV files with these columns:</p>
             <div class="format-example">ItemName,ItemID,MinBuyout,AvgBuyout,Quantity,Quality</div>
-            <p><strong>Or use this simple format:</strong></p>
+            <p><strong>Option 2:</strong> Upload Auctioneer Lua files directly:</p>
+            <div class="format-example">Auc-ScanData.lua (from your SavedVariables folder)</div>
+            <p><strong>Option 3:</strong> Simple CSV format:</p>
             <div class="format-example">Item,Price,Quantity</div>
         </div>
         
@@ -304,9 +306,9 @@
             <div class="faction-upload alliance">
                 <div class="faction-title">🛡️ Alliance Auction House</div>
                 <div class="upload-area" onclick="document.getElementById('allianceFile').click()">
-                    <div class="upload-text">Click to upload Alliance CSV data</div>
-                    <div class="upload-text">or drag and drop file here</div>
-                    <input type="file" id="allianceFile" accept=".csv" />
+                    <div class="upload-text">Click to upload Alliance data</div>
+                    <div class="upload-text">CSV or Auc-ScanData.lua files</div>
+                    <input type="file" id="allianceFile" accept=".csv,.lua,.txt" />
                     <div id="allianceInfo" class="file-info"></div>
                 </div>
             </div>
@@ -314,9 +316,9 @@
             <div class="faction-upload horde">
                 <div class="faction-title">⚔️ Horde Auction House</div>
                 <div class="upload-area" onclick="document.getElementById('hordeFile').click()">
-                    <div class="upload-text">Click to upload Horde CSV data</div>
-                    <div class="upload-text">or drag and drop file here</div>
-                    <input type="file" id="hordeFile" accept=".csv" />
+                    <div class="upload-text">Click to upload Horde data</div>
+                    <div class="upload-text">CSV or Auc-ScanData.lua files</div>
+                    <input type="file" id="hordeFile" accept=".csv,.lua,.txt" />
                     <div id="hordeInfo" class="file-info"></div>
                 </div>
             </div>
@@ -390,27 +392,133 @@
             const infoDiv = document.getElementById(faction + 'Info');
             infoDiv.textContent = `Loading ${file.name}...`;
             
-            Papa.parse(file, {
-                header: true,
-                skipEmptyLines: true,
-                complete: function(results) {
-                    if (faction === 'alliance') {
-                        allianceData = processCSVData(results.data);
-                        infoDiv.textContent = `✅ Loaded ${allianceData.length} Alliance items`;
-                    } else {
-                        hordeData = processCSVData(results.data);
-                        infoDiv.textContent = `✅ Loaded ${hordeData.length} Horde items`;
+            const fileName = file.name.toLowerCase();
+            
+            if (fileName.endsWith('.lua') || fileName.includes('auc-scandata')) {
+                // Handle Lua file
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const luaContent = e.target.result;
+                        const parsedData = parseLuaFile(luaContent);
+                        
+                        if (parsedData.length === 0) {
+                            infoDiv.textContent = `❌ No auction data found in ${file.name}`;
+                            return;
+                        }
+                        
+                        if (faction === 'alliance') {
+                            allianceData = parsedData;
+                            infoDiv.textContent = `✅ Loaded ${allianceData.length} Alliance items from Lua`;
+                        } else {
+                            hordeData = parsedData;
+                            infoDiv.textContent = `✅ Loaded ${hordeData.length} Horde items from Lua`;
+                        }
+                        
+                        updateAnalyzeButton();
+                    } catch (error) {
+                        infoDiv.textContent = `❌ Error parsing Lua file: ${error.message}`;
                     }
-                    
-                    updateAnalyzeButton();
-                },
-                error: function(error) {
-                    infoDiv.textContent = `❌ Error loading file: ${error.message}`;
-                }
-            });
+                };
+                reader.readAsText(file);
+            } else {
+                // Handle CSV file (existing logic)
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        if (faction === 'alliance') {
+                            allianceData = processCSVData(results.data);
+                            infoDiv.textContent = `✅ Loaded ${allianceData.length} Alliance items from CSV`;
+                        } else {
+                            hordeData = processCSVData(results.data);
+                            infoDiv.textContent = `✅ Loaded ${hordeData.length} Horde items from CSV`;
+                        }
+                        
+                        updateAnalyzeButton();
+                    },
+                    error: function(error) {
+                        infoDiv.textContent = `❌ Error loading CSV file: ${error.message}`;
+                    }
+                });
+            }
         }
         
-        function processCSVData(rawData) {
+        function parseLuaFile(luaContent) {
+            const items = [];
+            const minPrice = 0; // Process all items, let user filter later
+            
+            try {
+                // Multiple parsing patterns for different Auctioneer formats
+                const patterns = [
+                    // Pattern 1: ["ItemName"] = {price, quantity, ...}
+                    /\["([^"]+)"\]\s*=\s*\{[^}]*?(\d+)[^}]*?(\d+)/g,
+                    // Pattern 2: More complex nested data
+                    /\["([^"]+)"\]\s*=\s*\{[^{]*?\{[^}]*?(\d+)[^}]*?(\d+)/g,
+                    // Pattern 3: Simple item data
+                    /"([^"]+)"[^{]*?\{[^}]*?(\d+)[^}]*?(\d+)/g
+                ];
+                
+                for (let pattern of patterns) {
+                    let match;
+                    while ((match = pattern.exec(luaContent)) !== null) {
+                        const itemName = match[1];
+                        const price = parseInt(match[2]) || 0;
+                        const quantity = parseInt(match[3]) || 1;
+                        
+                        if (price >= minPrice && itemName && price > 0 && itemName.length > 2 && !itemName.match(/^\d+$/)) {
+                            items.push({
+                                itemName: itemName.trim(),
+                                price: price / 10000, // Convert copper to gold
+                                quantity: quantity
+                            });
+                        }
+                    }
+                    
+                    if (items.length > 0) break; // Found data, stop trying other patterns
+                }
+                
+                // Fallback: Look for any quoted strings followed by numbers that could be prices
+                if (items.length === 0) {
+                    const fallbackPattern = /"([^"]{3,})"[^0-9]*(\d{3,8})/g;
+                    let match;
+                    while ((match = fallbackPattern.exec(luaContent)) !== null) {
+                        const itemName = match[1];
+                        const price = parseInt(match[2]);
+                        
+                        if (price > 100 && price < 100000000 && // Reasonable price range
+                            itemName.length > 2 && 
+                            !itemName.match(/^\d+$/) &&
+                            !itemName.includes('=') &&
+                            !itemName.includes('{')) {
+                            items.push({
+                                itemName: itemName.trim(),
+                                price: price / 10000,
+                                quantity: 1
+                            });
+                        }
+                    }
+                }
+                
+                // Remove duplicates and sort
+                const uniqueItems = [];
+                const seen = new Set();
+                
+                for (let item of items) {
+                    const key = item.itemName.toLowerCase();
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        uniqueItems.push(item);
+                    }
+                }
+                
+                return uniqueItems.sort((a, b) => b.price - a.price);
+                
+            } catch (error) {
+                console.error('Error parsing Lua file:', error);
+                throw new Error('Failed to parse Auctioneer data');
+            }
+        }
             return rawData.map(row => {
                 // Handle different CSV formats
                 let itemName, price, quantity;
