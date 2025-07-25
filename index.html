@@ -283,6 +283,18 @@
             margin-top: 10px;
             overflow-x: auto;
         }
+
+        .debug-info {
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #ccc;
+            max-height: 200px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -375,6 +387,8 @@
         let allianceData = [];
         let hordeData = [];
         let analysisResults = [];
+        let currentSortColumn = -1;
+        let currentSortDirection = 'desc';
         
         // File upload handlers
         document.getElementById('allianceFile').addEventListener('change', function(e) {
@@ -417,27 +431,35 @@
                         
                         updateAnalyzeButton();
                     } catch (error) {
+                        console.error('Lua parsing error:', error);
                         infoDiv.textContent = `❌ Error parsing Lua file: ${error.message}`;
                     }
                 };
                 reader.readAsText(file);
             } else {
-                // Handle CSV file (existing logic)
+                // Handle CSV file
                 Papa.parse(file, {
                     header: true,
                     skipEmptyLines: true,
+                    dynamicTyping: true,
                     complete: function(results) {
-                        if (faction === 'alliance') {
-                            allianceData = processCSVData(results.data);
-                            infoDiv.textContent = `✅ Loaded ${allianceData.length} Alliance items from CSV`;
-                        } else {
-                            hordeData = processCSVData(results.data);
-                            infoDiv.textContent = `✅ Loaded ${hordeData.length} Horde items from CSV`;
+                        try {
+                            if (faction === 'alliance') {
+                                allianceData = processCSVData(results.data);
+                                infoDiv.textContent = `✅ Loaded ${allianceData.length} Alliance items from CSV`;
+                            } else {
+                                hordeData = processCSVData(results.data);
+                                infoDiv.textContent = `✅ Loaded ${hordeData.length} Horde items from CSV`;
+                            }
+                            
+                            updateAnalyzeButton();
+                        } catch (error) {
+                            console.error('CSV processing error:', error);
+                            infoDiv.textContent = `❌ Error processing CSV: ${error.message}`;
                         }
-                        
-                        updateAnalyzeButton();
                     },
                     error: function(error) {
+                        console.error('CSV parsing error:', error);
                         infoDiv.textContent = `❌ Error loading CSV file: ${error.message}`;
                     }
                 });
@@ -447,136 +469,127 @@
         function parseLuaFile(luaContent) {
             console.log('DEBUG: Starting Lua file parsing...');
             console.log('DEBUG: File size:', luaContent.length, 'characters');
-            console.log('DEBUG: First 500 characters:', luaContent.substring(0, 500));
             
             const items = [];
-            const minPrice = 0;
+            const itemMap = new Map();
             
             try {
-                // Check if it's actually a Lua file
-                if (!luaContent.includes('=') && !luaContent.includes('{')) {
-                    console.log('DEBUG: File doesn\'t look like Lua format');
-                    throw new Error('File doesn\'t appear to be in Lua format');
-                }
+                // Multiple parsing strategies for different Auctioneer formats
                 
-                // Multiple parsing patterns for different Auctioneer formats
-                const patterns = [
-                    // Pattern 1: ["ItemName"] = {price, quantity, ...}
-                    /\["([^"]+)"\]\s*=\s*\{[^}]*?(\d+)[^}]*?(\d+)/g,
-                    // Pattern 2: More complex nested data
-                    /\["([^"]+)"\]\s*=\s*\{[^{]*?\{[^}]*?(\d+)[^}]*?(\d+)/g,
-                    // Pattern 3: Simple item data
-                    /"([^"]+)"[^{]*?\{[^}]*?(\d+)[^}]*?(\d+)/g,
-                    // Pattern 4: Direct key-value pairs
-                    /\[(\d+)\]\s*=\s*\{[^}]*?(\d+)[^}]*?(\d+)/g,
-                    // Pattern 5: Nested table format
-                    /\["([^"]+)"\].*?(\d{4,})/g
-                ];
+                // Strategy 1: Look for return statements with item data
+                const returnPattern = /"return\s*\{\{([^}]+\}[^}]*)+\}"/g;
+                let returnMatch;
+                let foundItems = 0;
                 
-                let patternUsed = -1;
-                for (let i = 0; i < patterns.length; i++) {
-                    const pattern = patterns[i];
-                    let match;
-                    let matchCount = 0;
+                while ((returnMatch = returnPattern.exec(luaContent)) !== null) {
+                    const returnData = returnMatch[0];
+                    console.log('DEBUG: Found return data block, length:', returnData.length);
                     
-                    console.log(`DEBUG: Trying pattern ${i + 1}...`);
+                    // Parse individual item entries
+                    const itemPattern = /\{\"\|c[^|]*\|h\[([^\]]+)\]\|h\|r\"[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,(\d+),(\d+)/g;
+                    let itemMatch;
                     
-                    while ((match = pattern.exec(luaContent)) !== null && matchCount < 1000) {
-                        matchCount++;
-                        let itemName, price, quantity;
+                    while ((itemMatch = itemPattern.exec(returnData)) !== null) {
+                        const itemName = itemMatch[1];
+                        const price = parseInt(itemMatch[2]) || 0;
+                        const quantity = parseInt(itemMatch[3]) || 1;
                         
-                        if (i === 3) { // Pattern 4: Item ID format
-                            itemName = `Item_${match[1]}`;
-                            price = parseInt(match[2]) || 0;
-                            quantity = parseInt(match[3]) || 1;
-                        } else if (i === 4) { // Pattern 5: Simple format
-                            itemName = match[1];
-                            price = parseInt(match[2]) || 0;
-                            quantity = 1;
-                        } else {
-                            itemName = match[1];
-                            price = parseInt(match[2]) || 0;
-                            quantity = parseInt(match[3]) || 1;
+                        if (price > 0 && itemName && itemName.length > 1) {
+                            const key = itemName.toLowerCase().trim();
+                            
+                            if (!itemMap.has(key) || itemMap.get(key).price > price) {
+                                itemMap.set(key, {
+                                    itemName: itemName.trim(),
+                                    price: price / 10000, // Convert copper to gold
+                                    quantity: quantity
+                                });
+                                foundItems++;
+                            }
                         }
-                        
-                        if (price >= minPrice && itemName && price > 0 && itemName.length > 2 && !itemName.match(/^\d+$/)) {
-                            items.push({
-                                itemName: itemName.trim(),
-                                price: price / 10000, // Convert copper to gold
-                                quantity: quantity
-                            });
-                        }
-                    }
-                    
-                    console.log(`DEBUG: Pattern ${i + 1} found ${matchCount} matches, ${items.length} valid items`);
-                    
-                    if (items.length > 0) {
-                        patternUsed = i;
-                        break;
                     }
                 }
                 
-                // Fallback: Look for any quoted strings followed by numbers
-                if (items.length === 0) {
-                    console.log('DEBUG: Trying fallback pattern...');
-                    const fallbackPattern = /"([^"]{3,})"[^0-9]*(\d{3,8})/g;
-                    let match;
-                    let fallbackCount = 0;
+                console.log('DEBUG: Strategy 1 found', foundItems, 'items');
+                
+                // Strategy 2: If no items found, try broader pattern matching
+                if (foundItems === 0) {
+                    console.log('DEBUG: Trying strategy 2 - broader pattern matching');
                     
-                    while ((match = fallbackPattern.exec(luaContent)) !== null && fallbackCount < 1000) {
-                        fallbackCount++;
+                    const broadPattern = /\|h\[([^\]]+)\]\|h[^}]*,\s*(\d+),\s*(\d+)/g;
+                    let match;
+                    
+                    while ((match = broadPattern.exec(luaContent)) !== null) {
                         const itemName = match[1];
-                        const price = parseInt(match[2]);
+                        const price = parseInt(match[2]) || 0;
+                        const quantity = parseInt(match[3]) || 1;
                         
-                        if (price > 100 && price < 100000000 && 
-                            itemName.length > 2 && 
-                            !itemName.match(/^\d+$/) &&
-                            !itemName.includes('=') &&
-                            !itemName.includes('{')) {
-                            items.push({
-                                itemName: itemName.trim(),
-                                price: price / 10000,
-                                quantity: 1
-                            });
+                        if (price > 0 && itemName && itemName.length > 1) {
+                            const key = itemName.toLowerCase().trim();
+                            
+                            if (!itemMap.has(key) || itemMap.get(key).price > price) {
+                                itemMap.set(key, {
+                                    itemName: itemName.trim(),
+                                    price: price / 10000,
+                                    quantity: quantity
+                                });
+                                foundItems++;
+                            }
                         }
                     }
-                    console.log(`DEBUG: Fallback pattern found ${fallbackCount} matches, ${items.length} valid items`);
                 }
                 
-                console.log(`DEBUG: Final result: ${items.length} items found using pattern ${patternUsed + 1}`);
-                
-                if (items.length === 0) {
-                    console.log('DEBUG: No items found. File might be in unsupported format.');
-                    // Show first few lines for debugging
-                    const lines = luaContent.split('\n').slice(0, 10);
-                    console.log('DEBUG: First 10 lines of file:', lines);
-                    throw new Error('No auction data found. Please check the file format.');
-                }
-                
-                // Remove duplicates and sort
-                const uniqueItems = [];
-                const seen = new Set();
-                
-                for (let item of items) {
-                    const key = item.itemName.toLowerCase();
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        uniqueItems.push(item);
+                // Strategy 3: Even broader fallback for any item links with prices
+                if (foundItems === 0) {
+                    console.log('DEBUG: Trying strategy 3 - fallback pattern');
+                    
+                    const fallbackPattern = /\[([^\]]+)\][^0-9]*(\d{3,})/g;
+                    let match;
+                    
+                    while ((match = fallbackPattern.exec(luaContent)) !== null) {
+                        const itemName = match[1];
+                        const price = parseInt(match[2]) || 0;
+                        
+                        if (price > 100 && itemName && itemName.length > 2 && !itemName.includes('|')) {
+                            const key = itemName.toLowerCase().trim();
+                            
+                            if (!itemMap.has(key)) {
+                                itemMap.set(key, {
+                                    itemName: itemName.trim(),
+                                    price: price / 10000,
+                                    quantity: 1
+                                });
+                                foundItems++;
+                            }
+                        }
                     }
                 }
                 
-                console.log(`DEBUG: After removing duplicates: ${uniqueItems.length} unique items`);
-                return uniqueItems.sort((a, b) => b.price - a.price);
+                const result = Array.from(itemMap.values());
+                console.log(`DEBUG: Final result: ${result.length} unique items`);
+                
+                if (result.length === 0) {
+                    // Show a sample of the file content for debugging
+                    console.log('DEBUG: Sample content:', luaContent.substring(0, 500));
+                    throw new Error('No auction data found. Please check that this is a valid Auctioneer scan data file.');
+                }
+                
+                return result.sort((a, b) => b.price - a.price);
                 
             } catch (error) {
                 console.error('DEBUG: Error parsing Lua file:', error);
-                throw error;
+                throw new Error('Failed to parse Auctioneer data: ' + error.message);
             }
         }
+        
+        function processCSVData(rawData) {
+            if (!rawData || rawData.length === 0) {
+                throw new Error('CSV file is empty or invalid');
+            }
+            
             return rawData.map(row => {
-                // Handle different CSV formats
                 let itemName, price, quantity;
                 
+                // Handle different CSV formats
                 if (row.ItemName || row['Item Name']) {
                     itemName = row.ItemName || row['Item Name'];
                     price = parseFloat(row.MinBuyout || row.AvgBuyout || row.Price || 0);
@@ -586,62 +599,80 @@
                     price = parseFloat(row.Price || 0);
                     quantity = parseInt(row.Quantity || row.Qty || 1);
                 } else {
-                    // Try to guess columns
+                    // Try to guess columns from first few non-empty values
                     const keys = Object.keys(row);
                     itemName = row[keys[0]] || 'Unknown Item';
                     price = parseFloat(row[keys[1]] || 0);
                     quantity = parseInt(row[keys[2]] || 1);
                 }
                 
+                // Convert price from copper to gold if it seems to be in copper
+                if (price > 10000) {
+                    price = price / 10000;
+                }
+                
                 return {
-                    itemName: itemName.trim(),
-                    price: price / 10000, // Convert copper to gold
-                    quantity: quantity
+                    itemName: itemName ? itemName.toString().trim() : 'Unknown Item',
+                    price: price || 0,
+                    quantity: quantity || 1
                 };
-            }).filter(item => item.price > 0 && item.itemName);
+            }).filter(item => item.price > 0 && item.itemName && item.itemName !== 'Unknown Item');
         }
         
         function updateAnalyzeButton() {
             const btn = document.getElementById('analyzeBtn');
             btn.disabled = allianceData.length === 0 || hordeData.length === 0;
+            
+            if (allianceData.length > 0 && hordeData.length > 0) {
+                btn.textContent = `Analyze Cross-Faction Opportunities (${allianceData.length} vs ${hordeData.length} items)`;
+            }
         }
         
         function analyzeData() {
-            const minProfit = parseFloat(document.getElementById('minProfit').value);
-            const minProfitPercent = parseFloat(document.getElementById('minProfitPercent').value);
+            const minProfit = parseFloat(document.getElementById('minProfit').value) || 0;
+            const minProfitPercent = parseFloat(document.getElementById('minProfitPercent').value) || 0;
             
             analysisResults = [];
+            console.log('Starting analysis with', allianceData.length, 'Alliance items and', hordeData.length, 'Horde items');
             
-            // Create item maps for quick lookup
+            // Create item maps for quick lookup (case-insensitive)
             const allianceMap = new Map();
             const hordeMap = new Map();
             
             allianceData.forEach(item => {
-                allianceMap.set(item.itemName.toLowerCase(), item);
+                const key = item.itemName.toLowerCase().trim();
+                if (!allianceMap.has(key) || allianceMap.get(key).price > item.price) {
+                    allianceMap.set(key, item);
+                }
             });
             
             hordeData.forEach(item => {
-                hordeMap.set(item.itemName.toLowerCase(), item);
+                const key = item.itemName.toLowerCase().trim();
+                if (!hordeMap.has(key) || hordeMap.get(key).price > item.price) {
+                    hordeMap.set(key, item);
+                }
             });
             
             // Find matching items between factions
             const allItems = new Set([...allianceMap.keys(), ...hordeMap.keys()]);
+            console.log('Found', allItems.size, 'unique items across both factions');
             
             allItems.forEach(itemKey => {
                 const allianceItem = allianceMap.get(itemKey);
                 const hordeItem = hordeMap.get(itemKey);
                 
-                if (allianceItem && hordeItem) {
+                if (allianceItem && hordeItem && allianceItem.price > 0 && hordeItem.price > 0) {
                     const alliancePrice = allianceItem.price;
                     const hordePrice = hordeItem.price;
                     
-                    if (alliancePrice !== hordePrice) {
+                    if (Math.abs(alliancePrice - hordePrice) > 0.01) { // Avoid tiny differences
                         const profitGold = Math.abs(hordePrice - alliancePrice);
-                        const profitPercent = (profitGold / Math.min(alliancePrice, hordePrice)) * 100;
+                        const lowerPrice = Math.min(alliancePrice, hordePrice);
+                        const profitPercent = (profitGold / lowerPrice) * 100;
                         
                         if (profitGold >= minProfit && profitPercent >= minProfitPercent) {
                             analysisResults.push({
-                                itemName: allianceItem.itemName,
+                                itemName: allianceItem.itemName, // Use the original case
                                 alliancePrice: alliancePrice,
                                 hordePrice: hordePrice,
                                 profitGold: profitGold,
@@ -655,6 +686,7 @@
                 }
             });
             
+            console.log('Found', analysisResults.length, 'profitable opportunities');
             displayResults();
         }
         
@@ -680,8 +712,8 @@
             // Update summary
             const summary = document.getElementById('summary');
             const totalOpportunities = analysisResults.length;
-            const avgProfit = analysisResults.reduce((sum, item) => sum + item.profitGold, 0) / totalOpportunities || 0;
-            const maxProfit = Math.max(...analysisResults.map(item => item.profitGold), 0);
+            const avgProfit = totalOpportunities > 0 ? analysisResults.reduce((sum, item) => sum + item.profitGold, 0) / totalOpportunities : 0;
+            const maxProfit = totalOpportunities > 0 ? Math.max(...analysisResults.map(item => item.profitGold)) : 0;
             const allianceToHorde = analysisResults.filter(item => item.direction === 'Alliance → Horde').length;
             
             summary.innerHTML = `
@@ -720,64 +752,23 @@
         }
         
         function sortTable(columnIndex) {
-            // Implementation for table sorting
-            console.log('Sorting by column:', columnIndex);
-        }
-        
-        function exportToCSV() {
-            if (analysisResults.length === 0) {
-                alert('No results to export');
-                return;
+            if (analysisResults.length === 0) return;
+            
+            const isNumeric = [false, true, true, true, true, false, true, true][columnIndex];
+            const keys = ['itemName', 'alliancePrice', 'hordePrice', 'profitGold', 'profitPercent', 'direction', 'allianceQty', 'hordeQty'];
+            const key = keys[columnIndex];
+            
+            if (currentSortColumn === columnIndex) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortColumn = columnIndex;
+                currentSortDirection = isNumeric ? 'desc' : 'asc';
             }
             
-            const headers = ['Item Name', 'Alliance Price', 'Horde Price', 'Profit Gold', 'Profit Percent', 'Direction', 'Alliance Qty', 'Horde Qty'];
-            const csvContent = [
-                headers.join(','),
-                ...analysisResults.map(item => [
-                    `"${item.itemName}"`,
-                    item.alliancePrice.toFixed(2),
-                    item.hordePrice.toFixed(2),
-                    item.profitGold.toFixed(2),
-                    item.profitPercent.toFixed(1),
-                    `"${item.direction}"`,
-                    item.allianceQty,
-                    item.hordeQty
-                ].join(','))
-            ].join('\n');
-            
-            const blob = new Blob([csvContent], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `wow_arbitrage_analysis_${new Date().toISOString().split('T')[0]}.csv`;
-            a.click();
-            window.URL.revokeObjectURL(url);
-        }
-        
-        // Drag and drop functionality
-        ['allianceFile', 'hordeFile'].forEach(id => {
-            const uploadArea = document.querySelector(`#${id}`).parentElement;
-            
-            uploadArea.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                uploadArea.style.borderColor = '#ffd700';
-            });
-            
-            uploadArea.addEventListener('dragleave', (e) => {
-                e.preventDefault();
-                uploadArea.style.borderColor = '';
-            });
-            
-            uploadArea.addEventListener('drop', (e) => {
-                e.preventDefault();
-                uploadArea.style.borderColor = '';
-                const files = e.dataTransfer.files;
-                if (files.length > 0) {
-                    document.getElementById(id).files = files;
-                    handleFileUpload({target: {files: files}}, id.replace('File', ''));
-                }
-            });
-        });
-    </script>
-</body>
-</html>
+            analysisResults.sort((a, b) => {
+                let valueA = a[key];
+                let valueB = b[key];
+                
+                if (isNumeric) {
+                    valueA = parseFloat(valueA) || 0;
+                    valueB = parse
